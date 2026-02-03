@@ -1,12 +1,16 @@
 import streamlit as st
 import uuid
+import json
+import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
-import pandas as pd
 
-# ================= FIREBASE =================
-cred = credentials.Certificate("firebase_key.json")
-firebase_admin.initialize_app(cred)
+# ================= FIREBASE INIT (SAFE) =================
+if not firebase_admin._apps:
+    key_dict = json.loads(st.secrets["firebase_key"])
+    cred = credentials.Certificate(key_dict)
+    firebase_admin.initialize_app(cred)
+
 db = firestore.client()
 
 # ================= CONFIG =================
@@ -17,9 +21,9 @@ SECURITY_USER = "security"
 SECURITY_PASS = "admin123"
 
 # ================= UI =================
-st.set_page_config("Digital Valet", layout="wide")
+st.set_page_config(page_title="Digital Valet", layout="wide")
 st.title("🚗 Digital Valet Parking System")
-st.subheader("Hi, welcome to our smart parking platform")
+st.caption("Real-Time Field Project | Firebase Powered")
 st.divider()
 
 role = st.sidebar.selectbox("Select Role", ["Home", "User", "Security"])
@@ -27,20 +31,21 @@ role = st.sidebar.selectbox("Select Role", ["Home", "User", "Security"])
 # ================= HOME =================
 if role == "Home":
     st.info("""
-Real-Time Digital Valet System (Firebase Backend)
+### Workflow
+1. User creates account & logs in  
+2. User books → UID generated (pending only)  
+3. Security verifies UID → parking record created  
+4. Return car → record deleted  
 
-Workflow:
-1. User books slot → gets UID.
-2. Security verifies UID → real parking record created.
-3. Return → record deleted & slot freed.
-
-This works globally using Firebase.
+✔ Global  
+✔ Multi-device  
+✔ Fraud-safe  
 """)
     st.stop()
 
 # ================= USER =================
 if role == "User":
-    mode = st.sidebar.radio("User", ["Login", "Create Account"])
+    mode = st.sidebar.radio("User Access", ["Login", "Create Account"])
 
     # -------- CREATE ACCOUNT --------
     if mode == "Create Account":
@@ -48,10 +53,11 @@ if role == "User":
         p = st.sidebar.text_input("Create Password", type="password")
 
         if st.sidebar.button("Register"):
-            db.collection("users").document(u).set({
-                "password": p
-            })
-            st.success("Account created! Now login.")
+            if db.collection("users").document(u).get().exists:
+                st.error("Username already exists")
+            else:
+                db.collection("users").document(u).set({"password": p})
+                st.success("Account created! Please login.")
         st.stop()
 
     # -------- LOGIN --------
@@ -80,24 +86,28 @@ if role == "User":
                 "vehicletype": vtype
             })
 
-            st.success("Booking created")
-            st.code(f"Your UID: {uid}")
-            st.info("Show this UID to security at parking gate")
+            st.success("Booking Created")
+            st.code(uid)
+            st.info("Show this UID to security at entry gate")
 
     # -------- GET CAR --------
     if option == "Get My Car":
         uid = st.text_input("Enter UID")
 
         if st.button("Request Return"):
-            db.collection("parking").document(uid).update({
-                "status": "Requested"
-            })
-            st.success("Return request sent to security")
+            park_doc = db.collection("parking").document(uid).get()
+            if park_doc.exists:
+                db.collection("parking").document(uid).update({
+                    "status": "Requested"
+                })
+                st.success("Return request sent")
+            else:
+                st.error("Vehicle not currently parked")
 
 # ================= SECURITY =================
 if role == "Security":
-    su = st.sidebar.text_input("Username")
-    sp = st.sidebar.text_input("Password", type="password")
+    su = st.sidebar.text_input("Security Username")
+    sp = st.sidebar.text_input("Security Password", type="password")
 
     if su != SECURITY_USER or sp != SECURITY_PASS:
         st.warning("Invalid security login")
@@ -106,34 +116,34 @@ if role == "Security":
     st.success("Security Dashboard")
 
     # -------- VERIFY & PARK --------
-    st.subheader("Verify UID (Entry Gate)")
+    st.subheader("Verify UID (Entry)")
     uid = st.text_input("Enter UID from user")
 
     if st.button("Verify & Park"):
         doc = db.collection("pending").document(uid).get()
 
-        if doc.exists:
+        if not doc.exists:
+            st.error("Invalid / Fake UID")
+        else:
             data = doc.to_dict()
             vtype = data["vehicletype"]
 
-            # Get used slots
-            parked = db.collection("parking").stream()
-            used_slots = [d.to_dict()["slot"] for d in parked]
+            # get used slots
+            used = [d.to_dict()["slot"] for d in db.collection("parking").stream()]
 
-            # Allocate slot
-            if vtype == "Car":
-                slots = [f"C{i}" for i in range(1, TOTAL_CAR_SLOTS+1)]
-            else:
-                slots = [f"B{i}" for i in range(1, TOTAL_BIKE_SLOTS+1)]
+            slots = (
+                [f"C{i}" for i in range(1, TOTAL_CAR_SLOTS + 1)]
+                if vtype == "Car"
+                else [f"B{i}" for i in range(1, TOTAL_BIKE_SLOTS + 1)]
+            )
 
-            free_slots = list(set(slots) - set(used_slots))
-            if not free_slots:
-                st.error("No slots available")
+            free = list(set(slots) - set(used))
+            if not free:
+                st.error("Parking Full")
                 st.stop()
 
-            slot = free_slots[0]
+            slot = free[0]
 
-            # Create real record
             db.collection("parking").document(uid).set({
                 "username": data["username"],
                 "name": data["name"],
@@ -142,26 +152,29 @@ if role == "Security":
                 "status": "Parked"
             })
 
-            # Remove from pending
             db.collection("pending").document(uid).delete()
+            st.success(f"Vehicle Parked → Slot {slot}")
 
-            st.success("Vehicle parked successfully")
-            st.code(f"Slot: {slot}")
-        else:
-            st.error("Invalid / Fake UID")
-
-    # -------- LIVE TABLE --------
+    # -------- ACTIVE TABLE --------
     st.subheader("Active Parking Records")
-    docs = db.collection("parking").stream()
-    rows = [d.to_dict() | {"UID": d.id} for d in docs]
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True)
+    records = [
+        d.to_dict() | {"UID": d.id}
+        for d in db.collection("parking").stream()
+    ]
+
+    if records:
+        st.dataframe(pd.DataFrame(records), use_container_width=True)
+    else:
+        st.info("No vehicles parked")
 
     # -------- RETURN CAR --------
     st.subheader("Return Vehicle")
     ruid = st.text_input("Enter UID to return")
 
     if st.button("Return Car"):
-        db.collection("parking").document(ruid).delete()
-        st.success("Vehicle returned & record deleted")
-        st.experimental_rerun()
+        if db.collection("parking").document(ruid).get().exists:
+            db.collection("parking").document(ruid).delete()
+            st.success("Vehicle returned & record deleted")
+            st.experimental_rerun()
+        else:
+            st.error("UID not found")
