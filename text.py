@@ -116,4 +116,52 @@ if role == "Security":
             data = doc.to_dict()
             vtype = data["vehicletype"]
 
-            # Get u
+            # Get used slots
+            parked = db.collection("parking").stream()
+            used_slots = [d.to_dict()["slot"] for d in parked]
+
+            # Allocate slot
+            if vtype == "Car":
+                slots = [f"C{i}" for i in range(1, TOTAL_CAR_SLOTS+1)]
+            else:
+                slots = [f"B{i}" for i in range(1, TOTAL_BIKE_SLOTS+1)]
+
+            free_slots = list(set(slots) - set(used_slots))
+            if not free_slots:
+                st.error("No slots available")
+                st.stop()
+
+            slot = free_slots[0]
+
+            # Create real record
+            db.collection("parking").document(uid).set({
+                "username": data["username"],
+                "name": data["name"],
+                "vehicletype": vtype,
+                "slot": slot,
+                "status": "Parked"
+            })
+
+            # Remove from pending
+            db.collection("pending").document(uid).delete()
+
+            st.success("Vehicle parked successfully")
+            st.code(f"Slot: {slot}")
+        else:
+            st.error("Invalid / Fake UID")
+
+    # -------- LIVE TABLE --------
+    st.subheader("Active Parking Records")
+    docs = db.collection("parking").stream()
+    rows = [d.to_dict() | {"UID": d.id} for d in docs]
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True)
+
+    # -------- RETURN CAR --------
+    st.subheader("Return Vehicle")
+    ruid = st.text_input("Enter UID to return")
+
+    if st.button("Return Car"):
+        db.collection("parking").document(ruid).delete()
+        st.success("Vehicle returned & record deleted")
+        st.experimental_rerun()
